@@ -24,6 +24,7 @@ db.exec(`
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     hwid       TEXT UNIQUE NOT NULL,
     username   TEXT UNIQUE NOT NULL,
+    pfp_url    TEXT DEFAULT '',
     created_at INTEGER DEFAULT (unixepoch())
   );
   CREATE TABLE IF NOT EXISTS friends (
@@ -42,6 +43,13 @@ db.exec(`
   );
 `);
 
+// Support for existing users (Migration)
+try {
+  db.exec("ALTER TABLE users ADD COLUMN pfp_url TEXT DEFAULT ''");
+} catch (e) {
+  // Column likely already exists
+}
+
 // Connected WebSocket clients: Map<user_id, ws>
 const clients = new Map();
 
@@ -58,15 +66,35 @@ app.post('/register', (req, res) => {
 
   try {
     const r = db.prepare('INSERT INTO users (hwid, username) VALUES (?, ?)').run(hwid, username);
-    const user = db.prepare('SELECT id, username FROM users WHERE id = ?').get(r.lastInsertRowid);
+    const user = db.prepare('SELECT id, username, pfp_url FROM users WHERE id = ?').get(r.lastInsertRowid);
     res.json(user);
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
+app.post('/user/update', (req, res) => {
+  const { hwid, username, pfp_url } = req.body;
+  if (!hwid || !username) return res.status(400).json({ error: 'Missing fields' });
+
+  const user = db.prepare('SELECT id FROM users WHERE hwid = ?').get(hwid);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+
+  // Check if new username is taken by someone else
+  const taken = db.prepare('SELECT id FROM users WHERE username = ? AND id != ?').get(username, user.id);
+  if (taken) return res.status(409).json({ error: 'Username already taken' });
+
+  try {
+    db.prepare('UPDATE users SET username = ?, pfp_url = ? WHERE id = ?').run(username, pfp_url || '', user.id);
+    const updated = db.prepare('SELECT id, username, pfp_url FROM users WHERE id = ?').get(user.id);
+    res.json(updated);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/user/by-hwid/:hwid', (req, res) => {
-  const user = db.prepare('SELECT id, username FROM users WHERE hwid = ?').get(req.params.hwid);
+  const user = db.prepare('SELECT id, username, pfp_url FROM users WHERE hwid = ?').get(req.params.hwid);
   if (!user) return res.status(404).json({ error: 'Not found' });
   res.json(user);
 });
@@ -74,7 +102,7 @@ app.get('/user/by-hwid/:hwid', (req, res) => {
 app.get('/users/search', (req, res) => {
   const q = (req.query.q || '').trim();
   if (!q) return res.json([]);
-  const users = db.prepare('SELECT id, username FROM users WHERE username LIKE ? LIMIT 15').all(`%${q}%`);
+  const users = db.prepare('SELECT id, username, pfp_url FROM users WHERE username LIKE ? LIMIT 15').all(`%${q}%`);
   res.json(users);
 });
 
