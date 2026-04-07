@@ -154,11 +154,11 @@ app.get('/users/search', (req, res) => {
 app.get('/friends/:user_id', (req, res) => {
   const id = parseInt(req.params.user_id);
   const friends = db.prepare(`
-    SELECT u.id, u.username FROM friends f
+    SELECT u.id, u.username, u.pfp_url FROM friends f
     JOIN users u ON f.friend_id = u.id
     WHERE f.user_id = ? AND f.status = 'accepted'
     UNION
-    SELECT u.id, u.username FROM friends f
+    SELECT u.id, u.username, u.pfp_url FROM friends f
     JOIN users u ON f.user_id = u.id
     WHERE f.friend_id = ? AND f.status = 'accepted'
   `).all(id, id);
@@ -168,7 +168,7 @@ app.get('/friends/:user_id', (req, res) => {
 app.get('/friends/requests/:user_id', (req, res) => {
   const id = parseInt(req.params.user_id);
   const requests = db.prepare(`
-    SELECT u.id, u.username FROM friends f
+    SELECT u.id, u.username, u.pfp_url FROM friends f
     JOIN users u ON f.user_id = u.id
     WHERE f.friend_id = ? AND f.status = 'pending'
   `).all(id);
