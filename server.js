@@ -23,6 +23,9 @@ const upload = multer({ storage, limits: { fileSize: 50 * 1024 * 1024 } }); // 5
 // Serve uploads statically
 app.use('/uploads', express.static(uploadsDir));
 
+// Health check for Railway
+app.get('/', (req, res) => res.send('Greggerson Chat Server is online! 🚀'));
+
 // Allow cross-origin for development / Railway deployment
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
@@ -148,9 +151,15 @@ app.get('/debug/db', (req, res) => {
 
 app.get('/debug/repair', (req, res) => {
   try {
-    const r = db.exec("UPDATE friends SET status = 'accepted' WHERE status IS NULL OR status = ''");
-    res.json({ message: "Repair attempted", notice: "Check /debug/db counts now" });
+    const r = db.prepare("UPDATE friends SET status = 'accepted' WHERE status IS NULL OR status = ''").run();
+    console.log(`[REPAIR] Updated ${r.changes} friends to 'accepted' status.`);
+    res.json({ 
+      success: true, 
+      changes: r.changes, 
+      message: "Repair finished. Open the app to see your friends!" 
+    });
   } catch (e) {
+    console.error("[REPAIR] Failed:", e.message);
     res.status(500).json({ error: e.message });
   }
 });
