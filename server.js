@@ -114,6 +114,11 @@ runMigration("msgs_group", "ALTER TABLE messages ADD COLUMN group_id INTEGER");
 runMigration("msgs_file", "ALTER TABLE messages ADD COLUMN file_url TEXT DEFAULT ''");
 runMigration("msgs_type", "ALTER TABLE messages ADD COLUMN file_type TEXT DEFAULT ''");
 
+// --- REPAIR: Ensure existing friends have 'accepted' status if they pre-date the status column ---
+try {
+  db.exec("UPDATE friends SET status = 'accepted' WHERE status IS NULL OR status = ''");
+} catch (e) { console.error("Repair error:", e.message); }
+
 // --- Debug Endpoint Update ---
 app.get('/debug/db', (req, res) => {
   try {
@@ -121,9 +126,16 @@ app.get('/debug/db', (req, res) => {
     const messagesInfo = db.prepare("PRAGMA table_info(messages)").all();
     const friendsInfo = db.prepare("PRAGMA table_info(friends)").all();
     const groupsInfo = db.prepare("PRAGMA table_info(groups)").all();
+    
+    const userCount = db.prepare("SELECT COUNT(*) as count FROM users").get().count;
+    const friendCount = db.prepare("SELECT COUNT(*) as count FROM friends").get().count;
+    const msgCount = db.prepare("SELECT COUNT(*) as count FROM messages").get().count;
+    const groupCount = db.prepare("SELECT COUNT(*) as count FROM groups").get().count;
+
     res.json({
       db_path: dbPath,
       migrations: migrationStatus,
+      counts: { users: userCount, friends: friendCount, messages: msgCount, groups: groupCount },
       tables: {
         users: usersInfo,
         messages: messagesInfo,
