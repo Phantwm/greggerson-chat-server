@@ -2,29 +2,28 @@ const { DatabaseSync } = require('node:sqlite');
 const express = require('express');
 const { WebSocketServer } = require('ws');
 const http = require('http');
-const path = require('path');
 const fs = require('fs');
+const path = require('path');
 const multer = require('multer');
+const crypto = require('crypto');
 
 const app = express();
 app.use(express.json());
 
-// Persistent storage path for uploads
-const uploadsDir = path.join(process.env.DATA_DIR || '.', 'uploads');
-if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+// Set up storage directory
+const UPLOADS_DIR = process.env.DB_PATH ? path.join(path.dirname(process.env.DB_PATH), 'uploads') : path.join(__dirname, 'uploads');
+if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 
-// Multer config for file uploads
+// Serve static uploads
+app.use('/uploads', express.static(UPLOADS_DIR));
+
+// Configure multer (10MB limit)
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, uploadsDir),
-  filename: (req, file, cb) => cb(null, Date.now() + '-' + file.originalname)
+  destination: (req, file, cb) => cb(null, UPLOADS_DIR),
+  filename: (req, file, cb) => cb(null, crypto.randomBytes(8).toString('hex') + path.extname(file.originalname))
 });
-const upload = multer({ storage, limits: { fileSize: 50 * 1024 * 1024 } }); // 50MB limit
-
-// Serve uploads statically
-app.use('/uploads', express.static(uploadsDir));
-
-// Health check for Railway
-app.get('/', (req, res) => res.send('Greggerson Chat Server is online! 🚀'));
+const upload = multer({ storage, limits: { fileSize: 10 * 1024 * 1024 } });
+app.use(express.json());
 
 // Allow cross-origin for development / Railway deployment
 app.use((req, res, next) => {
@@ -35,41 +34,9 @@ app.use((req, res, next) => {
   next();
 });
 
-// --- Debug Endpoint ---
-app.get('/debug/db', (req, res) => {
-  try {
-    const usersInfo = db.prepare("PRAGMA table_info(users)").all();
-    const messagesInfo = db.prepare("PRAGMA table_info(messages)").all();
-    const friendsInfo = db.prepare("PRAGMA table_info(friends)").all();
-    const groupsInfo = db.prepare("PRAGMA table_info(groups)").all();
-    res.json({
-      db_path: dbPath,
-      tables: {
-        users: usersInfo,
-        messages: messagesInfo,
-        friends: friendsInfo,
-        groups: groupsInfo
-      }
-    });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
 // --- Database (built-in node:sqlite, no install needed) ---
 const dbPath = process.env.DB_PATH || 'chat.db';
 const db = new DatabaseSync(dbPath);
-
-const migrationStatus = {};
-
-function runMigration(name, sql) {
-  try {
-    db.exec(sql);
-    migrationStatus[name] = "Success or already applied";
-  } catch (e) {
-    migrationStatus[name] = "Skipped/Error: " + e.message;
-  }
-}
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
@@ -86,101 +53,52 @@ db.exec(`
     status    TEXT DEFAULT 'pending',
     UNIQUE(user_id, friend_id)
   );
+  CREATE TABLE IF NOT EXISTS messages (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_id        INTEGER NOT NULL,
+    to_id          INTEGER,
+    group_id       INTEGER,
+    content        TEXT NOT NULL,
+    attachment_url TEXT DEFAULT '',
+    attachment_type TEXT DEFAULT '',
+    timestamp      INTEGER DEFAULT (unixepoch())
+  );
   CREATE TABLE IF NOT EXISTS groups (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     name       TEXT NOT NULL,
-    creator_id INTEGER NOT NULL,
+    owner_id   INTEGER NOT NULL,
+    icon_url   TEXT DEFAULT '',
     created_at INTEGER DEFAULT (unixepoch())
   );
   CREATE TABLE IF NOT EXISTS group_members (
-    id       INTEGER PRIMARY KEY AUTOINCREMENT,
-    group_id INTEGER NOT NULL,
-    user_id  INTEGER NOT NULL,
+    group_id   INTEGER NOT NULL,
+    user_id    INTEGER NOT NULL,
     UNIQUE(group_id, user_id)
-  );
-  CREATE TABLE IF NOT EXISTS messages (
-    id        INTEGER PRIMARY KEY AUTOINCREMENT,
-    from_id   INTEGER NOT NULL,
-    to_id     INTEGER,
-    group_id  INTEGER,
-    content   TEXT NOT NULL,
-    file_url  TEXT DEFAULT '',
-    file_type TEXT DEFAULT '',
-    timestamp INTEGER DEFAULT (unixepoch())
   );
 `);
 
-// Migrations
-runMigration("users_pfp", "ALTER TABLE users ADD COLUMN pfp_url TEXT DEFAULT ''");
-runMigration("msgs_to", "ALTER TABLE messages ADD COLUMN to_id INTEGER");
-runMigration("msgs_group", "ALTER TABLE messages ADD COLUMN group_id INTEGER");
-runMigration("msgs_file", "ALTER TABLE messages ADD COLUMN file_url TEXT DEFAULT ''");
-runMigration("msgs_type", "ALTER TABLE messages ADD COLUMN file_type TEXT DEFAULT ''");
-
-// --- REPAIR: Ensure existing friends have 'accepted' status if they pre-date the status column ---
+// Support for existing users (Migration)
 try {
-  db.exec("UPDATE friends SET status = 'accepted' WHERE status IS NULL OR status = ''");
-} catch (e) { console.error("Repair error:", e.message); }
+  db.exec("ALTER TABLE users ADD COLUMN pfp_url TEXT DEFAULT ''");
+} catch (e) { }
 
-// --- Debug Endpoint Update ---
-app.get('/debug/db', (req, res) => {
-  try {
-    const usersInfo = db.prepare("PRAGMA table_info(users)").all();
-    const messagesInfo = db.prepare("PRAGMA table_info(messages)").all();
-    const friendsInfo = db.prepare("PRAGMA table_info(friends)").all();
-    const groupsInfo = db.prepare("PRAGMA table_info(groups)").all();
-    
-    const userCount = db.prepare("SELECT COUNT(*) as count FROM users").get().count;
-    const friendCount = db.prepare("SELECT COUNT(*) as count FROM friends").get().count;
-    const msgCount = db.prepare("SELECT COUNT(*) as count FROM messages").get().count;
-    const groupCount = db.prepare("SELECT COUNT(*) as count FROM groups").get().count;
-
-    res.json({
-      db_path: dbPath,
-      migrations: migrationStatus,
-      counts: { users: userCount, friends: friendCount, messages: msgCount, groups: groupCount },
-      tables: {
-        users: usersInfo,
-        messages: messagesInfo,
-        friends: friendsInfo,
-        groups: groupsInfo
-      }
-    });
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.get('/debug/repair', (req, res) => {
-  try {
-    const r = db.prepare("UPDATE friends SET status = 'accepted' WHERE status IS NULL OR status = ''").run();
-    console.log(`[REPAIR] Updated ${r.changes} friends to 'accepted' status.`);
-    res.json({ 
-      success: true, 
-      changes: r.changes, 
-      message: "Repair finished. Open the app to see your friends!" 
-    });
-  } catch (e) {
-    console.error("[REPAIR] Failed:", e.message);
-    res.status(500).json({ error: e.message });
-  }
-});
+try {
+  db.exec("ALTER TABLE messages ADD COLUMN attachment_url TEXT DEFAULT ''");
+  db.exec("ALTER TABLE messages ADD COLUMN attachment_type TEXT DEFAULT ''");
+  db.exec("ALTER TABLE messages ADD COLUMN group_id INTEGER");
+} catch (e) { }
 
 // Connected WebSocket clients: Map<user_id, ws>
 const clients = new Map();
-
-// --- Media Support ---
-
-app.post('/upload', upload.single('file'), (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-  const url = `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}`;
-  res.json({ url });
-});
 
 // --- Users ---
 
 app.post('/register', (req, res) => {
   const { hwid, username } = req.body;
   if (!hwid || !username) return res.status(400).json({ error: 'Missing fields' });
-  
+  if (!/^[a-zA-Z0-9_]{2,20}$/.test(username))
+    return res.status(400).json({ error: 'Username must be 2–20 characters: letters, numbers, underscores only' });
+
   const taken = db.prepare('SELECT id FROM users WHERE username = ?').get(username);
   if (taken) return res.status(409).json({ error: 'Username already taken' });
 
@@ -193,16 +111,30 @@ app.post('/register', (req, res) => {
   }
 });
 
+app.post('/upload', upload.single('file'), (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+  const url = `/uploads/${req.file.filename}`;
+  res.json({ url, type: req.file.mimetype });
+});
+
 app.post('/user/update', (req, res) => {
   const { hwid, username, pfp_url } = req.body;
+  if (!hwid || !username) return res.status(400).json({ error: 'Missing fields' });
+
   const user = db.prepare('SELECT id FROM users WHERE hwid = ?').get(hwid);
   if (!user) return res.status(404).json({ error: 'User not found' });
+
+  // Check if new username is taken by someone else
+  const taken = db.prepare('SELECT id FROM users WHERE username = ? AND id != ?').get(username, user.id);
+  if (taken) return res.status(409).json({ error: 'Username already taken' });
 
   try {
     db.prepare('UPDATE users SET username = ?, pfp_url = ? WHERE id = ?').run(username, pfp_url || '', user.id);
     const updated = db.prepare('SELECT id, username, pfp_url FROM users WHERE id = ?').get(user.id);
     res.json(updated);
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.get('/user/by-hwid/:hwid', (req, res) => {
@@ -213,6 +145,7 @@ app.get('/user/by-hwid/:hwid', (req, res) => {
 
 app.get('/users/search', (req, res) => {
   const q = (req.query.q || '').trim();
+  if (!q) return res.json([]);
   const users = db.prepare('SELECT id, username, pfp_url FROM users WHERE username LIKE ? LIMIT 15').all(`%${q}%`);
   res.json(users);
 });
@@ -222,11 +155,11 @@ app.get('/users/search', (req, res) => {
 app.get('/friends/:user_id', (req, res) => {
   const id = parseInt(req.params.user_id);
   const friends = db.prepare(`
-    SELECT u.id, u.username, u.pfp_url FROM friends f
+    SELECT u.id, u.username FROM friends f
     JOIN users u ON f.friend_id = u.id
     WHERE f.user_id = ? AND f.status = 'accepted'
     UNION
-    SELECT u.id, u.username, u.pfp_url FROM friends f
+    SELECT u.id, u.username FROM friends f
     JOIN users u ON f.user_id = u.id
     WHERE f.friend_id = ? AND f.status = 'accepted'
   `).all(id, id);
@@ -234,89 +167,126 @@ app.get('/friends/:user_id', (req, res) => {
 });
 
 app.get('/friends/requests/:user_id', (req, res) => {
+  const id = parseInt(req.params.user_id);
   const requests = db.prepare(`
-    SELECT u.id, u.username, u.pfp_url FROM friends f
+    SELECT u.id, u.username FROM friends f
     JOIN users u ON f.user_id = u.id
     WHERE f.friend_id = ? AND f.status = 'pending'
-  `).all(parseInt(req.params.user_id));
+  `).all(id);
   res.json(requests);
 });
 
 app.post('/friends/request', (req, res) => {
   const { from_id, to_id } = req.body;
-  try {
-    db.prepare('INSERT INTO friends (user_id, friend_id) VALUES (?, ?)').run(from_id, to_id);
-    const recipientWs = clients.get(parseInt(to_id));
-    if (recipientWs && recipientWs.readyState === 1) {
-      const sender = db.prepare('SELECT id, username, pfp_url FROM users WHERE id = ?').get(from_id);
-      recipientWs.send(JSON.stringify({ type: 'friend_request', from: sender }));
-    }
-    res.json({ success: true });
-  } catch (e) { res.status(400).json({ error: 'Already sent or friend' }); }
+  if (!from_id || !to_id) return res.status(400).json({ error: 'Missing fields' });
+  if (from_id === to_id) return res.status(400).json({ error: 'Cannot add yourself' });
+
+  const toUser = db.prepare('SELECT id FROM users WHERE id = ?').get(to_id);
+  if (!toUser) return res.status(404).json({ error: 'User not found' });
+
+  const existing = db.prepare(
+    'SELECT * FROM friends WHERE (user_id=? AND friend_id=?) OR (user_id=? AND friend_id=?)'
+  ).get(from_id, to_id, to_id, from_id);
+
+  if (existing) {
+    return res.status(409).json({
+      error: existing.status === 'accepted' ? 'Already friends' : 'Friend request already sent'
+    });
+  }
+
+  db.prepare('INSERT INTO friends (user_id, friend_id) VALUES (?, ?)').run(from_id, to_id);
+
+  // Notify recipient if online
+  const recipientWs = clients.get(to_id);
+  if (recipientWs && recipientWs.readyState === 1) {
+    const sender = db.prepare('SELECT id, username FROM users WHERE id = ?').get(from_id);
+    recipientWs.send(JSON.stringify({ type: 'friend_request', from: sender }));
+  }
+
+  res.json({ success: true });
 });
 
 app.post('/friends/accept', (req, res) => {
-  const { user_id, friend_id } = req.body;
-  db.prepare("UPDATE friends SET status='accepted' WHERE user_id=? AND friend_id=?").run(friend_id, user_id);
-  const requesterWs = clients.get(parseInt(friend_id));
-  if (requesterWs) {
-    const accepter = db.prepare('SELECT id, username, pfp_url FROM users WHERE id = ?').get(user_id);
+  const { user_id, friend_id } = req.body; // user_id = accepter, friend_id = who sent the request
+  const result = db.prepare(
+    "UPDATE friends SET status='accepted' WHERE user_id=? AND friend_id=? AND status='pending'"
+  ).run(friend_id, user_id);
+
+  if (result.changes === 0) return res.status(404).json({ error: 'Request not found' });
+
+  // Notify the original requester if online
+  const requesterWs = clients.get(friend_id);
+  if (requesterWs && requesterWs.readyState === 1) {
+    const accepter = db.prepare('SELECT id, username FROM users WHERE id = ?').get(user_id);
     requesterWs.send(JSON.stringify({ type: 'friend_accepted', user: accepter }));
   }
+
   res.json({ success: true });
 });
 
 app.post('/friends/decline', (req, res) => {
-  const { user_id, friend_id } = req.body;
-  try {
-    db.prepare("DELETE FROM friends WHERE (user_id=? AND friend_id=?) OR (user_id=? AND friend_id=?)").run(friend_id, user_id, user_id, friend_id);
-    res.json({ success: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  const { user_id, friend_id } = req.body; // user_id = decliner, friend_id = who sent request
+  db.prepare('DELETE FROM friends WHERE user_id=? AND friend_id=?').run(friend_id, user_id);
+  res.json({ success: true });
 });
 
-// --- Group Chats ---
+// --- Groups ---
 
 app.post('/groups/create', (req, res) => {
-  const { name, creator_id, member_ids } = req.body;
+  const { name, owner_id } = req.body;
+  if (!name || !owner_id) return res.status(400).json({ error: 'Missing fields' });
+  
   try {
-    const r = db.prepare('INSERT INTO groups (name, creator_id) VALUES (?, ?)').run(name, creator_id);
-    const groupId = r.lastInsertRowid;
-    const allMembers = [creator_id, ...member_ids];
-    const stmt = db.prepare('INSERT INTO group_members (group_id, user_id) VALUES (?, ?)');
-    allMembers.forEach(uid => stmt.run(groupId, uid));
-    res.json({ id: groupId, name });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+    const result = db.prepare('INSERT INTO groups (name, owner_id) VALUES (?, ?)').run(name, owner_id);
+    const groupId = result.lastInsertRowid;
+    db.prepare('INSERT INTO group_members (group_id, user_id) VALUES (?, ?)').run(groupId, owner_id);
+    
+    const group = db.prepare('SELECT * FROM groups WHERE id = ?').get(groupId);
+    res.json(group);
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/groups/add_member', (req, res) => {
+  const { group_id, user_id } = req.body;
+  try {
+    db.prepare('INSERT INTO group_members (group_id, user_id) VALUES (?, ?)').run(group_id, user_id);
+    res.json({ success: true });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 app.get('/groups/:user_id', (req, res) => {
+  const { user_id } = req.params;
   const groups = db.prepare(`
-    SELECT g.* FROM groups g
-    JOIN group_members gm ON g.id = gm.group_id
-    WHERE gm.user_id = ?
-  `).all(parseInt(req.params.user_id));
+    SELECT g.id, g.name, g.icon_url, g.created_at
+    FROM groups g
+    JOIN group_members m ON g.id = m.group_id
+    WHERE m.user_id = ?
+  `).all(user_id);
   res.json(groups);
+});
+
+app.get('/messages/group/:group_id', (req, res) => {
+  const messages = db.prepare('SELECT * FROM messages WHERE group_id = ? ORDER BY timestamp ASC').all(req.params.group_id);
+  res.json(messages);
 });
 
 // --- Messages ---
 
-app.get('/messages/:user_id/:target_id', (req, res) => {
-  const { user_id, target_id } = req.params;
-  const isGroup = req.query.isGroup === 'true';
-  let messages;
-
-  if (isGroup) {
-    messages = db.prepare('SELECT * FROM messages WHERE group_id = ? ORDER BY timestamp ASC').all(target_id);
-  } else {
-    messages = db.prepare(`
-      SELECT * FROM messages
-      WHERE (from_id=? AND to_id=?) OR (from_id=? AND to_id=?)
-      ORDER BY timestamp ASC
-    `).all(user_id, target_id, target_id, user_id);
-  }
+app.get('/messages/:user_id/:other_id', (req, res) => {
+  const { user_id, other_id } = req.params;
+  const messages = db.prepare(`
+    SELECT * FROM messages
+    WHERE (from_id=? AND to_id=?) OR (from_id=? AND to_id=?)
+    ORDER BY timestamp ASC
+  `).all(user_id, other_id, other_id, user_id);
   res.json(messages);
 });
 
-// --- WebSocket & WebRTC ---
+// --- WebSocket ---
 
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
@@ -331,32 +301,49 @@ wss.on('connection', (ws) => {
       if (msg.type === 'auth') {
         userId = parseInt(msg.user_id);
         clients.set(userId, ws);
+        console.log(`[+] User ${userId} connected  (${clients.size} online)`);
         return;
       }
 
-      if (!userId) return;
+      if (msg.type === 'message' && userId) {
+        const { to_id, group_id, content, attachment_url = '', attachment_type = '' } = msg;
+        if (!content && !attachment_url) return;
 
-      // Handle direct messages & group messages
-      if (msg.type === 'message') {
-        const { to_id, group_id, content, file_url, file_type } = msg;
         const timestamp = Math.floor(Date.now() / 1000);
+        let result;
         
-        const result = db.prepare(
-          'INSERT INTO messages (from_id, to_id, group_id, content, file_url, file_type, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?)'
-        ).run(userId, to_id || null, group_id || null, content || '', file_url || '', file_type || '', timestamp);
+        if (group_id) {
+          result = db.prepare(
+            'INSERT INTO messages (from_id, group_id, content, attachment_url, attachment_type, timestamp) VALUES (?, ?, ?, ?, ?, ?)'
+          ).run(userId, group_id, String(content || '').trim(), String(attachment_url), String(attachment_type), timestamp);
+        } else {
+          result = db.prepare(
+            'INSERT INTO messages (from_id, to_id, content, attachment_url, attachment_type, timestamp) VALUES (?, ?, ?, ?, ?, ?)'
+          ).run(userId, to_id, String(content || '').trim(), String(attachment_url), String(attachment_type), timestamp);
+        }
 
-        const savedMsg = { id: result.lastInsertRowid, from_id: userId, to_id, group_id, content, file_url, file_type, timestamp };
+        const savedMsg = {
+          id: result.lastInsertRowid,
+          from_id: userId,
+          to_id,
+          group_id,
+          content: String(content || '').trim(),
+          attachment_url: String(attachment_url),
+          attachment_type: String(attachment_type),
+          timestamp
+        };
 
         if (group_id) {
-          // Broadcast to all group members
           const members = db.prepare('SELECT user_id FROM group_members WHERE group_id = ?').all(group_id);
-          members.forEach(m => {
-            const memberWs = clients.get(m.user_id);
-            if (memberWs && memberWs.readyState === 1) {
-              memberWs.send(JSON.stringify({ type: 'message', message: savedMsg }));
+          members.forEach(member => {
+            if (member.user_id === userId) return;
+            const recipientWs = clients.get(member.user_id);
+            if (recipientWs && recipientWs.readyState === 1) {
+              recipientWs.send(JSON.stringify({ type: 'message', message: savedMsg }));
             }
           });
-        } else if (to_id) {
+          ws.send(JSON.stringify({ type: 'message_sent', message: savedMsg }));
+        } else {
           const recipientWs = clients.get(to_id);
           if (recipientWs && recipientWs.readyState === 1) {
             recipientWs.send(JSON.stringify({ type: 'message', message: savedMsg }));
@@ -365,22 +352,28 @@ wss.on('connection', (ws) => {
         }
       }
 
-      // Handle WebRTC signaling
-      if (['call-offer', 'call-answer', 'call-ice', 'call-hangup'].includes(msg.type)) {
-        const { to_id } = msg;
-        const targetWs = clients.get(to_id);
-        if (targetWs && targetWs.readyState === 1) {
-          targetWs.send(JSON.stringify({ ...msg, from_id: userId }));
+      // WebRTC Signaling
+      if (['webrtc_offer', 'webrtc_answer', 'webrtc_ice', 'webrtc_end'].includes(msg.type) && userId) {
+        const recipientWs = clients.get(msg.to_id);
+        if (recipientWs && recipientWs.readyState === 1) {
+          msg.from_id = userId;
+          recipientWs.send(JSON.stringify(msg));
         }
       }
-
     } catch (e) {
       console.error('WS error:', e.message);
     }
   });
 
-  ws.on('close', () => { if (userId) clients.delete(userId); });
+  ws.on('close', () => {
+    if (userId) {
+      clients.delete(userId);
+      console.log(`[-] User ${userId} disconnected (${clients.size} online)`);
+    }
+  });
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Greggerson Chat running on port ${PORT}`));
+server.listen(PORT, () => {
+  console.log(`Greggerson Chat server running on http://localhost:${PORT}`);
+});
