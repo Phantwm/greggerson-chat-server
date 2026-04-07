@@ -146,6 +146,15 @@ app.get('/debug/db', (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+app.get('/debug/repair', (req, res) => {
+  try {
+    const r = db.exec("UPDATE friends SET status = 'accepted' WHERE status IS NULL OR status = ''");
+    res.json({ message: "Repair attempted", notice: "Check /debug/db counts now" });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Connected WebSocket clients: Map<user_id, ws>
 const clients = new Map();
 
