@@ -32,9 +32,41 @@ app.use((req, res, next) => {
   next();
 });
 
+// --- Debug Endpoint ---
+app.get('/debug/db', (req, res) => {
+  try {
+    const usersInfo = db.prepare("PRAGMA table_info(users)").all();
+    const messagesInfo = db.prepare("PRAGMA table_info(messages)").all();
+    const friendsInfo = db.prepare("PRAGMA table_info(friends)").all();
+    const groupsInfo = db.prepare("PRAGMA table_info(groups)").all();
+    res.json({
+      db_path: dbPath,
+      tables: {
+        users: usersInfo,
+        messages: messagesInfo,
+        friends: friendsInfo,
+        groups: groupsInfo
+      }
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // --- Database (built-in node:sqlite, no install needed) ---
 const dbPath = process.env.DB_PATH || 'chat.db';
 const db = new DatabaseSync(dbPath);
+
+const migrationStatus = {};
+
+function runMigration(name, sql) {
+  try {
+    db.exec(sql);
+    migrationStatus[name] = "Success or already applied";
+  } catch (e) {
+    migrationStatus[name] = "Skipped/Error: " + e.message;
+  }
+}
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
@@ -66,21 +98,41 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS messages (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
     from_id   INTEGER NOT NULL,
-    to_id     INTEGER, -- Null if group message
-    group_id  INTEGER, -- Null if DM
+    to_id     INTEGER,
+    group_id  INTEGER,
     content   TEXT NOT NULL,
     file_url  TEXT DEFAULT '',
-    file_type TEXT DEFAULT '', -- 'image', 'video', 'gif'
+    file_type TEXT DEFAULT '',
     timestamp INTEGER DEFAULT (unixepoch())
   );
 `);
 
-// Migrations (Add columns if they don't exist)
-try { db.exec("ALTER TABLE users ADD COLUMN pfp_url TEXT DEFAULT ''"); } catch(e){}
-try { db.exec("ALTER TABLE messages ADD COLUMN to_id INTEGER"); } catch(e){}
-try { db.exec("ALTER TABLE messages ADD COLUMN group_id INTEGER"); } catch(e){}
-try { db.exec("ALTER TABLE messages ADD COLUMN file_url TEXT DEFAULT ''"); } catch(e){}
-try { db.exec("ALTER TABLE messages ADD COLUMN file_type TEXT DEFAULT ''"); } catch(e){}
+// Migrations
+runMigration("users_pfp", "ALTER TABLE users ADD COLUMN pfp_url TEXT DEFAULT ''");
+runMigration("msgs_to", "ALTER TABLE messages ADD COLUMN to_id INTEGER");
+runMigration("msgs_group", "ALTER TABLE messages ADD COLUMN group_id INTEGER");
+runMigration("msgs_file", "ALTER TABLE messages ADD COLUMN file_url TEXT DEFAULT ''");
+runMigration("msgs_type", "ALTER TABLE messages ADD COLUMN file_type TEXT DEFAULT ''");
+
+// --- Debug Endpoint Update ---
+app.get('/debug/db', (req, res) => {
+  try {
+    const usersInfo = db.prepare("PRAGMA table_info(users)").all();
+    const messagesInfo = db.prepare("PRAGMA table_info(messages)").all();
+    const friendsInfo = db.prepare("PRAGMA table_info(friends)").all();
+    const groupsInfo = db.prepare("PRAGMA table_info(groups)").all();
+    res.json({
+      db_path: dbPath,
+      migrations: migrationStatus,
+      tables: {
+        users: usersInfo,
+        messages: messagesInfo,
+        friends: friendsInfo,
+        groups: groupsInfo
+      }
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 
 // Connected WebSocket clients: Map<user_id, ws>
 const clients = new Map();
@@ -182,6 +234,14 @@ app.post('/friends/accept', (req, res) => {
     requesterWs.send(JSON.stringify({ type: 'friend_accepted', user: accepter }));
   }
   res.json({ success: true });
+});
+
+app.post('/friends/decline', (req, res) => {
+  const { user_id, friend_id } = req.body;
+  try {
+    db.prepare("DELETE FROM friends WHERE (user_id=? AND friend_id=?) OR (user_id=? AND friend_id=?)").run(friend_id, user_id, user_id, friend_id);
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // --- Group Chats ---
