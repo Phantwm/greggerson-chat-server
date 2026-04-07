@@ -10,6 +10,15 @@ const crypto = require('crypto');
 const app = express();
 app.use(express.json());
 
+// Allow cross-origin for development / Railway deployment
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Headers', 'Content-Type');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, DELETE');
+  if (req.method === 'OPTIONS') return res.sendStatus(200);
+  next();
+});
+
 // Set up storage directory
 const UPLOADS_DIR = process.env.DB_PATH ? path.join(path.dirname(process.env.DB_PATH), 'uploads') : path.join(__dirname, 'uploads');
 if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR, { recursive: true });
@@ -23,16 +32,6 @@ const storage = multer.diskStorage({
   filename: (req, file, cb) => cb(null, crypto.randomBytes(8).toString('hex') + path.extname(file.originalname))
 });
 const upload = multer({ storage, limits: { fileSize: 10 * 1024 * 1024 } });
-app.use(express.json());
-
-// Allow cross-origin for development / Railway deployment
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Headers', 'Content-Type');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, DELETE');
-  if (req.method === 'OPTIONS') return res.sendStatus(200);
-  next();
-});
 
 // --- Database (built-in node:sqlite, no install needed) ---
 const dbPath = process.env.DB_PATH || 'chat.db';
