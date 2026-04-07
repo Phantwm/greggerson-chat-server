@@ -16,7 +16,8 @@ app.use((req, res, next) => {
 });
 
 // --- Database (built-in node:sqlite, no install needed) ---
-const db = new DatabaseSync('chat.db');
+const dbPath = process.env.DB_PATH || 'chat.db';
+const db = new DatabaseSync(dbPath);
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (

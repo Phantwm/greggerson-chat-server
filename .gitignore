@@ -1,0 +1,4 @@
+node_modules/
+chat.db
+.DS_Store
+*.log
